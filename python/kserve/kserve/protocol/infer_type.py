@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Union
 
 import numpy
 import numpy as np
@@ -201,6 +201,52 @@ class InferInput:
             self._parameters['binary_data_size'] = len(self._raw_data)
 
 
+class InferRequestedOutput:
+    _name: str
+    _parameters: Dict[str, Union[bool, int, str]]
+
+    def __init__(self, name: str, parameters: Optional[Dict[str, Union[bool, int, str]]] = None):
+        """An object of InferRequestedOutput class is used to describe
+        a requested output tensor for an inference request.
+        Parameters
+        ----------
+        name : str
+            The name of outpute tensor whose data will be described by this object
+        parameters : dict
+            The additional server-specific parameters.
+        """
+
+        if parameters is None:
+            self._parameters = {}
+        else:
+            assert all((
+                any((isinstance(value, t) for t in (bool, int, str)))
+                for value in parameters.values()
+            ))
+            self._parameters = parameters
+        self._name = name
+
+    @property
+    def name(self):
+        """Get the name of output associated with this object.
+        Returns
+        -------
+        str
+            The name of output
+        """
+        return self._name
+
+    @property
+    def parameters(self):
+        """Get the parameters of output associated with this object.
+        Returns
+        -------
+        dict
+            The key, value pair of string and InferParameter
+        """
+        return self._parameters
+
+
 def get_content(datatype: str, data: InferTensorContents):
     if datatype == "BOOL":
         return list(data.bool_contents)
@@ -238,9 +284,10 @@ class InferRequest:
     parameters: Optional[Dict]
     inputs: List[InferInput]
     from_grpc: bool
+    outputs: Optional[List[InferRequestedOutput]] = None
 
     def __init__(self, model_name: str, infer_inputs: List[InferInput],
-                 request_id=None, raw_inputs=None, from_grpc=False, parameters=None):
+                 request_id=None, raw_inputs=None, from_grpc=False, parameters=None, infer_outputs: Optional[List["InferOutput"]] = None):
         if parameters is None:
             parameters = {}
         self.id = request_id
@@ -248,6 +295,7 @@ class InferRequest:
         self.inputs = infer_inputs
         self.parameters = parameters
         self.from_grpc = from_grpc
+        self.outputs = outputs
         if raw_inputs:
             for i, raw_input in enumerate(raw_inputs):
                 self.inputs[i]._raw_data = raw_input
@@ -259,8 +307,17 @@ class InferRequest:
                                    data=get_content(input_tensor.datatype, input_tensor.contents),
                                    parameters=input_tensor.parameters)
                         for input_tensor in request.inputs]
+        infer_outputs = None
+        if len(request.outputs) > 0:
+            infer_outputs = [
+                InferRequestedOutput(name=output.name, parameters={
+                    parameter_name: parameter_value
+                    for parameter_name, parameter_value in output.parameters.items()
+                })
+                for output in request.outputs
+            ]
         return cls(request_id=request.id, model_name=request.model_name, infer_inputs=infer_inputs,
-                   raw_inputs=request.raw_input_contents, from_grpc=True, parameters=request.parameters)
+                   raw_inputs=request.raw_input_contents, from_grpc=True, parameters=request.parameters, infer_outputs=infer_outputs)
 
     def to_rest(self) -> Dict:
         """ Converts the InferRequest object to v2 REST InferenceRequest message
@@ -279,10 +336,21 @@ class InferRequest:
             else:
                 infer_input_dict["data"] = infer_input.data
             infer_inputs.append(infer_input_dict)
-        return {
+        rest = {
             'id': self.id,
             'inputs': infer_inputs
         }
+        if self.outputs is not None:
+            infer_outputs = []
+            for output in self.outputs:
+                infer_output_dict = {
+                    "name": output.name
+                }
+                if output.parameters:
+                    infer_output_dict["parameters"] = dict(**output.parameters)
+                infer_outputs.append(infer_output_dict)
+            rest["outputs"] = infer_outputs
+        return rest
 
     def to_grpc(self) -> ModelInferRequest:
         """ Converts the InferRequest object to gRPC ModelInferRequest message
@@ -313,9 +381,14 @@ class InferRequest:
                 else:
                     raise InvalidInput("invalid input datatype")
             infer_inputs.append(infer_input_dict)
-
+        infer_outputs: Optional[List[ModelInferRequest.InferRequestedOutputTensor]] = None
+        if self.outputs is not None:
+            infer_outputs = []
+            for output in self.outputs:
+                infer_outputs.append(ModelInferRequest.InferRequestedOutputTensor(
+                    name=output.name, parameters=output.parameters))
         return ModelInferRequest(id=self.id, model_name=self.model_name, inputs=infer_inputs,
-                                 raw_input_contents=raw_input_contents)
+                                 raw_input_contents=raw_input_contents, outputs=infer_outputs)
 
     def as_dataframe(self) -> pd.DataFrame:
         """
